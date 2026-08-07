@@ -689,7 +689,7 @@ class NapCatAdapter(BasePlatformAdapter):
     async def send_typing(self, chat_id: str, metadata: dict | None = None) -> None:
         # QQ OneBot: NapCat exposes set_input_status(event_type, user_id).
         #   event_type 1 = "对方正在输入" (typing bubble shown)
-        #   event_type 0 = clear/hide the typing bubble (verified live).
+        #   event_type 0 = "对方正在说话" (speaking status, verified live 2026-08-08)
         # Typing only applies to private chats — groups have no typing bubble.
         # Marker: _napcat_typing_indicator
         try:
@@ -706,17 +706,12 @@ class NapCatAdapter(BasePlatformAdapter):
             logger.debug("NapCat: send_typing failed (non-fatal)", exc_info=True)
 
     async def stop_typing(self, chat_id: str) -> None:
-        # event_type 0 clears the typing bubble (verified live: the
-        # "对方正在输入" indicator disappears on the peer client).
+        # event_type 0 = "对方正在说话" (speaking status, NOT a clear).
+        # QQ's input-status event_type has no dedicated "clear" value; the
+        # bubble times out on its own. Sending 0 here would wrongly show the
+        # peer as "speaking", so this is left as a no-op for QQ.
         try:
             if chat_id.startswith("group:"):
                 return
-            await call_onebot_api(
-                self._http_api,
-                "set_input_status",
-                {"user_id": int(chat_id), "event_type": 0},
-                self._access_token or None,
-                timeout=3,
-            )
         except Exception:
             logger.debug("NapCat: stop_typing failed (non-fatal)", exc_info=True)
