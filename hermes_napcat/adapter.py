@@ -687,7 +687,36 @@ class NapCatAdapter(BasePlatformAdapter):
         return _strip_markdown(content)
 
     async def send_typing(self, chat_id: str, metadata: dict | None = None) -> None:
-        pass  # QQ OneBot 无 typing indicator
+        # QQ OneBot: NapCat exposes set_input_status(event_type, user_id).
+        #   event_type 1 = "对方正在输入" (typing bubble shown)
+        #   event_type 0 = clear/hide the typing bubble (verified live).
+        # Typing only applies to private chats — groups have no typing bubble.
+        # Marker: _napcat_typing_indicator
+        try:
+            if chat_id.startswith("group:"):
+                return
+            await call_onebot_api(
+                self._http_api,
+                "set_input_status",
+                {"user_id": int(chat_id), "event_type": 1},
+                self._access_token or None,
+                timeout=3,
+            )
+        except Exception:
+            logger.debug("NapCat: send_typing failed (non-fatal)", exc_info=True)
 
     async def stop_typing(self, chat_id: str) -> None:
-        pass
+        # event_type 0 clears the typing bubble (verified live: the
+        # "对方正在输入" indicator disappears on the peer client).
+        try:
+            if chat_id.startswith("group:"):
+                return
+            await call_onebot_api(
+                self._http_api,
+                "set_input_status",
+                {"user_id": int(chat_id), "event_type": 0},
+                self._access_token or None,
+                timeout=3,
+            )
+        except Exception:
+            logger.debug("NapCat: stop_typing failed (non-fatal)", exc_info=True)
