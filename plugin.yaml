@@ -1,0 +1,41 @@
+name: hermes-napcat
+label: napcat
+kind: platform
+version: 0.2.8
+description: >
+  NapCat (QQ / OneBot 11) platform adapter for Hermes Agent.
+
+  Connects Hermes to QQ via a NapCat container (or any OneBot 11 actor)
+  over a reverse WebSocket (default ws://127.0.0.1:18800) and the OneBot
+  HTTP API (default http://127.0.0.1:18801).  Supports private DM and
+  group chat, friend-request auto-handling (friend_policy), per-mode
+  reply "quote" gating (reply_to_mode), QQ typing indicator via
+  set_input_status, media (image/voice/video/file) send, and a full
+  qq_* toolset for calling OneBot APIs directly.
+
+  Configure in ~/.hermes/config.yaml:
+
+    platforms:
+      napcat:
+        enabled: true
+        extra:
+          http_api: "http://127.0.0.1:18801"
+          access_token: ""
+          self_id: "<你的QQ号>"
+          ws_port: 18800
+          dm_policy: "open"          # open | allowlist | disabled
+          allow_from: []             # QQ 号白名单（DM）
+          group_policy: "open"       # open | allowlist | disabled
+          group_allow_from: []
+          friend_policy: "open"      # open | allowlist | disabled（好友申请）
+          admins: []                 # 可调用管理工具的白名单 QQ
+          reply_to_mode: "off"       # off | first | all
+          media_max_mb: 5
+
+  Requires an external NapCat (or OneBot 11) server.  Use the host-network
+  Docker container (--network host) so 127.0.0.1 inside the container maps
+  to the host reverse-WS + HTTP API with no port mapping.
+author: 风澪 <eolynya@zhou2008.cn>
+requires_env:
+  # 无强制环境变量——全部走 config.yaml platforms.napcat.extra
+install_hint: "NapCat 容器: docker run -d --name napcat --net host ... 详见 README"

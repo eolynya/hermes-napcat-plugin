@@ -330,7 +330,7 @@ class NapCatAdapter(BasePlatformAdapter):
     MAX_MESSAGE_LENGTH = _QQ_TEXT_LIMIT
 
     def __init__(self, config: PlatformConfig) -> None:
-        super().__init__(config, Platform.NAPCAT)
+        super().__init__(config, Platform("napcat"))
         extra: dict[str, Any] = getattr(config, "extra", {}) or {}
 
         self._http_api: str = extra.get("http_api", "").rstrip("/")
@@ -365,7 +365,7 @@ class NapCatAdapter(BasePlatformAdapter):
 
         # Wire up qq_tool so the agent can call QQ APIs directly
         try:
-            from gateway.platforms import qq_tool as _qq_tool
+            from . import qq_tool as _qq_tool
             _qq_tool._init(self._http_api, self._access_token, self._admins)
         except ImportError:
             pass
@@ -548,7 +548,7 @@ class NapCatAdapter(BasePlatformAdapter):
             return
 
         source = SessionSource(
-            platform=Platform.NAPCAT,
+            platform=Platform("napcat"),
             chat_id=chat_id,
             chat_name=sender_name if not is_group else group_id,
             chat_type="group" if is_group else "dm",
@@ -583,7 +583,7 @@ class NapCatAdapter(BasePlatformAdapter):
 
         # Set per-message context so admin-gated tools know who is asking
         try:
-            from gateway.platforms import qq_tool as _qq_tool
+            from . import qq_tool as _qq_tool
             _qq_tool._set_context(sender_id, is_admin=is_admin)
         except ImportError:
             pass
