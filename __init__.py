@@ -40,14 +40,19 @@ def register(ctx) -> None:
     """Plugin entry point — called by the Hermes plugin system at startup."""
     # 1) qq_* toolset — import triggers the module-level registry.register()
     #    calls (qq_tool.py registers ~50 tools in the "napcat" toolset).
+    #    ⚠️ Must use RELATIVE import: the plugin is loaded as
+    #    hermes_plugins.<slug>, and an absolute `import hermes_napcat`
+    #    resolves against site-packages (the legacy pip version), not the
+    #    plugin dir — _load_directory_module does NOT put plugin_dir on
+    #    sys.path. (2026-08-11: fixed connect() version-shadowing bug)
     try:
-        from hermes_napcat import qq_tool  # noqa: F401
+        from .hermes_napcat import qq_tool  # noqa: F401
     except Exception:
         logger.warning("NapCat: failed to import qq_tool", exc_info=True)
 
-    # 2) napcat platform adapter.
+    # 2) napcat platform adapter.  Relative import — see note above.
     try:
-        from hermes_napcat.adapter import NapCatAdapter
+        from .hermes_napcat.adapter import NapCatAdapter
 
         ctx.register_platform(
             name="napcat",
