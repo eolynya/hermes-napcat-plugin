@@ -72,6 +72,25 @@ platforms:
       media_max_mb: 5
 ```
 
+### 参数说明
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `http_api` | `""`（必填） | NapCat OneBot HTTP API 基址，如 `http://127.0.0.1:18801` |
+| `access_token` | `""` | OneBot access_token（NapCat 未开启则留空） |
+| `self_id` | `""` | bot 的 QQ 号；留空或占位符（`YOUR_QQ_NUMBER`）时启动时经 HTTP probe 自动填充 |
+| `ws_port` | `18800` | 反向 WebSocket 监听端口（NapCat 的 `websocketClients[0].url` 指向这里） |
+| `dm_policy` | `"allowlist"` | 私聊策略：`allowlist` 仅白名单可聊 / `open` 所有人 / `disabled` 关闭私聊 |
+| `allow_from` | `[]` | 私聊白名单 QQ 号列表（配合 `dm_policy: allowlist`） |
+| `group_policy` | `"open"` | 群聊策略：`open` 所有群 / `allowlist` 仅白名单群 / `disabled` 关闭群聊 |
+| `group_allow_from` | `[]` | 群白名单（群号列表，配合 `group_policy: allowlist`） |
+| `friend_policy` | `"open"` | 好友申请处理：`open` 秒通过 / `allowlist` 仅通过白名单（`admins`+`allow_from`）/ `disabled` 不自动处理 |
+| `admins` | `[]` | 管理员 QQ 号列表（可调用踢人/禁言等管理工具） |
+| `reply_to_mode` | `"off"` | 发送时是否附加「引用回复」：`off` 直接发新消息 / `first` 仅回复引用时 / `all` 总是引用 |
+| `media_max_mb` | `5` | 图片/语音大小上限（MB），超限降级为保留远程 URL |
+
+> 白名单字段（`allow_from`/`admins`/`group_allow_from`）同时兼容三种写法：真 YAML list、逗号字符串 `"123,456"`、JSON 字符串 `'["123","456"]'`（插件内部统一解析）。
+
 > **工具集**：插件已自动聚合核心工具，`platform_toolsets.napcat` 只需 `["hermes-napcat"]` 即可获得 48 个 qq_* + 56 个核心工具；也可显式列出各工具集。
 
 **NapCat 容器**（必须 `--network host`，否则容器内 `127.0.0.1` 指容器自己，连不上宿主）：
@@ -100,14 +119,41 @@ docker run -d --name napcat --restart=always --network host \
 
 ---
 
-## 上游改动
+## 与上游的区别
 
-本 fork 相对 [shubyi/hermes-napcat](https://github.com/shubyi/hermes-napcat) 的改动：
-- 重构为标准 Hermes platform 插件（`plugin.yaml` + 根 `__init__.py`）
-- 修复插件根绝对导入被 site-packages 劫持的 bug
-- `ctx.register_tool` 补注册 qq_* 工具（否则不被 agent 装载）
-- 聚合核心工具集 + 自带 skill 自动加载
-- 上游原本的 `friend_policy`/`reply_to_mode`/typing 指示器等改动齐全
+本 fork 相对 [shubyi/hermes-napcat](https://github.com/shubyi/hermes-napcat)（上游最后一次提交 2026-04）的改动（已于 2026-08 实测验证）：
+
+### 结构：pip 包 → 标准 Hermes 插件
+
+| 项 | 上游 | 本 fork |
+|---|---|---|
+| 安装方式 | `pip install` + `hermes-napcat install`（源码 patch gateway/config.py、run.py、toolsets.py） | `hermes plugins install eolynya/hermes-napcat-plugin`（零源码 patch） |
+| 加载 | 拷贝 adapter 到 `gateway/platforms/napcat.py` | 插件 `register_platform()` 注册进 `platform_registry` |
+| 工具装载 | `qq_tool.py` 拷贝到 `tools/` | 插件内 `ctx.register_tool` 补注册 48 个 `qq_*` |
+
+### 配置键（上游 10 个 → 本 fork 12 个）
+
+本 fork **新增 2 个**配置键：
+- `friend_policy` — 好友申请自动处理（`open`/`allowlist`/`disabled`），上游直接丢弃好友请求
+- `reply_to_mode` — 回复引用开关（`off`/`first`/`all`），上游发送时无条件加引用段
+
+其余 10 个键（`http_api`/`access_token`/`self_id`/`ws_port`/`dm_policy`/`allow_from`/`group_policy`/`group_allow_from`/`admins`/`media_max_mb`）与上游一致。
+
+### 功能增强
+
+| 功能 | 上游 | 本 fork |
+|---|---|---|
+| QQ 输入状态（typing） | `send_typing` 是 `pass` 空实现（注释误称「QQ 无 typing」） | 经 `set_input_status` 实现「对方正在输入」气泡（私聊） |
+| 好友请求 | 事件被丢弃，不处理 | `_handle_request()` 按 `friend_policy` 自动通过/拒绝/忽略 |
+| 白名单解析 | 仅接受真 list | `_coerce_qid_set()` 兼容 list / 逗号串 / JSON 字符串 |
+| 重连兼容 | `connect(self)` 缺 `is_reconnect` 参数 | `connect(self, is_reconnect=False)` 兼容 Hermes 重连 |
+| Markdown 剥离 | 已有 `_strip_markdown` | 保留（QQ 不渲染 Markdown，发送前转纯文本） |
+
+### 其他
+
+- 修复插件根绝对导入被 site-packages 旧包劫持的 bug（`connect()` 缺 `is_reconnect` 导致连接失败）
+- 聚合核心工具集（`hermes-cli` 56 个并入 `hermes-napcat`）使 QQ agent「开箱即有手」
+- 自带 `qq-napcat` skill，安装时自动放进 flat 树供 `<available_skills>` 索引自动加载
 
 ## License
 
