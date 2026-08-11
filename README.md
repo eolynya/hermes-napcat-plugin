@@ -4,8 +4,6 @@
 
 **让 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 通过 [NapCat](https://github.com/NapNeko/NapCatQQ)（QQ / OneBot 11）接入 QQ 的标准平台插件**
 
-[![License](https://img.shields.io/github/license/eolynya/hermes-napcat-plugin)](LICENSE)
-
 </div>
 
 本仓库是 [shubyi/hermes-napcat](https://github.com/shubyi/hermes-napcat) 的 fork，将其重构成**标准的 Hermes platform 插件**（`kind: platform`），通过 `hermes plugins install` 一键安装，**零源码 patch**。在任意 QQ 群或私聊中与你的 AI 助手对话，支持完整的群管理功能。
@@ -93,16 +91,6 @@ docker run -d --name napcat --restart=always --network host \
 
 ---
 
-## 从源码 patch 切换为插件（本机已验证流程）
-
-1. 备份源码 patch 三件套：`gateway/platforms/napcat.py`, `gateway/run.py`, `hermes_cli/platforms.py`
-2. `hermes plugins install file:///root/repos/hermes-napcat --no-enable`（本地路径亦支持）
-3. `hermes plugins enable hermes-napcat < /dev/null`
-4. `systemd-run --user --on-active=5 bash -c 'bash ~/.hermes/scripts/hermes-gw-restart.sh'` 重启
-5. 验证：`grep napcat gateway.log` 见 `✓ napcat connected` + `3 platform(s)`；插件优先接管，无需撤源码 patch
-
----
-
 ## 插件实现的几个关键点
 
 - **相对导入**：根 `__init__.py` 必须用 `from .hermes_napcat import ...` 相对导入。`_load_directory_module` 不把插件目录加进 `sys.path`，绝对导入会命中 site-packages 旧版（`connect()` 缺 `is_reconnect`）导致连接失败。
@@ -123,4 +111,4 @@ docker run -d --name napcat --restart=always --network host \
 
 ## License
 
-[MIT](LICENSE)
+MIT（与上游 [shubyi/hermes-napcat](https://github.com/shubyi/hermes-napcat) 一致）
