@@ -106,3 +106,82 @@ def register(ctx) -> None:
             logger.warning("NapCat: bundled skill not found at %s", _SKILL_PATH)
     except Exception:
         logger.warning("NapCat: failed to register bundled skill", exc_info=True)
+
+    # 4) Aggregate the bundled qq_* toolset with the core tools so a QQ agent
+    #    gets working tools (terminal/file/web/...) out of the box, not just
+    #    40+ qq_* OneBot calls.  The platform default toolset for a plugin is
+    #    derived as "hermes-{platform}" (= "hermes-napcat") by
+    #    _get_platform_tools, and that static definition ships with
+    #    includes: [] — so without this, an unconfigured platform_toolsets
+    #    leaves the QQ agent tool-less beyond qq_*.
+    #
+    #    We re-create "hermes-napcat" at runtime via create_custom_toolset()
+    #    to add hermes-cli (the 56-tool core set: terminal/file/web/memory/
+    #    skills/todo/vision/clarify/delegation/code_execution/...) to its
+    #    includes.  This is a process-local enhancement of the in-memory
+    #    TOOLSETS table — no core source edit, survives `hermes update`,
+    #    and is idempotent across plugin re-registration.
+    try:
+        from toolsets import TOOLSETS, create_custom_toolset
+
+        _ts = TOOLSETS.get("hermes-napcat") or {}
+        _tools = list(_ts.get("tools", []))
+        _includes = list(_ts.get("includes", []))
+        if "hermes-cli" not in _includes:
+            _includes.append("hermes-cli")
+        create_custom_toolset(
+            name="hermes-napcat",
+            description=_ts.get(
+                "description", "QQ (NapCat / OneBot 11) toolset + core tools"
+            ),
+            tools=_tools,
+            includes=_includes,
+        )
+        logger.info(
+            "NapCat: aggregated hermes-napcat toolset (tools=%d includes=%s)",
+            len(_tools),
+            _includes,
+        )
+    except Exception:
+        logger.warning("NapCat: failed to aggregate hermes-napcat toolset", exc_info=True)
+
+    # 5) Re-register the qq_* tools through ctx.register_tool so the plugin
+    #    manager actually SEES the "napcat" toolset.  qq_tool.py registers
+    #    them module-level via tools.registry.register (toolset="napcat"),
+    #    which populates the global registry but never adds the names to
+    #    PluginManager._plugin_tool_names — so get_plugin_toolsets() returns
+    #    nothing for this plugin, and _get_platform_tools() never enables the
+    #    napcat toolset for the platform.  Result (observed on 2026-08-11):
+    #    QQ sessions had ONLY core tools (terminal/file/web/...), the 48
+    #    qq_* tools were registered but never loaded into the agent.
+    #
+    #    Re-registering through ctx.register_tool is idempotent (registry
+    #    accepts the same name again) and records the names in
+    #    _plugin_tool_names, making get_plugin_toolsets() return
+    #    ("napcat", ...) → _get_platform_tools enables it (new plugin,
+    #    default-enabled rule at tools_config.py:2430).
+    try:
+        from tools.registry import registry
+
+        _qq_names = registry.get_tool_names_for_toolset("napcat")
+        _registered = 0
+        for _tn in _qq_names:
+            _te = registry.get_entry(_tn)
+            if _te is None:
+                continue
+            ctx.register_tool(
+                name=_tn,
+                toolset="napcat",
+                schema=_te.schema,
+                handler=_te.handler,
+                is_async=bool(getattr(_te, "is_async", False)),
+                description=_te.description or "",
+                emoji=getattr(_te, "emoji", "") or "",
+            )
+            _registered += 1
+        logger.info(
+            "NapCat: re-registered %d qq_* tools via ctx.register_tool (toolset=napcat)",
+            _registered,
+        )
+    except Exception:
+        logger.warning("NapCat: failed to re-register qq_* tools via ctx", exc_info=True)
