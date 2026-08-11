@@ -16,7 +16,7 @@ __all__ = ["register"]
 
 # Path to the bundled QQ skill shipped inside this plugin
 # (hermes_napcat/skills/qq/SKILL.md).  Registered via ctx.register_skill so it
-# is resolvable as skill_view("hermes-napcat:qq-napcat") without touching the
+# is resolvable as skill_view("hermes-napcat-plugin:qq-napcat") without touching the
 # flat ~/.hermes/skills tree.
 _SKILL_PATH = Path(__file__).resolve().parent / "hermes_napcat" / "skills" / "qq" / "SKILL.md"
 
@@ -83,7 +83,7 @@ def register(ctx) -> None:
         logger.warning("NapCat: failed to register platform adapter", exc_info=True)
 
     # 3) Bundled QQ skill (hermes_napcat/skills/qq/SKILL.md) — register it so
-    #    skill_view("hermes-napcat:qq-napcat") resolves, AND copy it into the
+    #    skill_view("hermes-napcat-plugin:qq-napcat") resolves, AND copy it into the
     #    flat ~/.hermes/skills/qq/ tree so it appears in the <available_skills>
     #    index (auto-loaded, model sees it without explicit lookup).
     #

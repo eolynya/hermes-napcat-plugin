@@ -1,4 +1,4 @@
-name: hermes-napcat
+name: hermes-napcat-plugin
 label: napcat
 kind: platform
 version: 0.2.8
