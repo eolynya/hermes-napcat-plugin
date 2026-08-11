@@ -17,6 +17,7 @@ Configuration in ~/.hermes/config.yaml:
           allow_from: []             # QQ numbers allowed for DMs
           group_policy: "open"       # open | allowlist | disabled
           group_allow_from: []       # falls back to allow_from
+          friend_policy: "open"      # open | allowlist | disabled (friend-add handling)
           admins: []                 # QQ numbers that can use admin-only tools
           media_max_mb: 5
 """
@@ -298,6 +299,27 @@ def check_napcat_requirements() -> bool:
         return False
 
 
+def _coerce_qid_set(raw) -> set[str]:
+    """Turn a QQ-id allowlist into a set of str, accepting a real list, a comma
+    string ("123,456"), or a JSON-string list ('["123","456"]')."""
+    import json as _json
+    if raw is None:
+        return set()
+    if isinstance(raw, str):
+        txt = raw.strip()
+        if txt.startswith("[") and txt.endswith("]"):
+            try:
+                return {str(x).strip() for x in _json.loads(txt)}
+            except Exception:
+                pass
+        if txt:
+            return {x.strip() for x in txt.split(",") if x.strip()}
+        return set()
+    if isinstance(raw, (list, tuple, set)):
+        return {str(x).strip() for x in raw if str(x).strip()}
+    return {str(raw).strip()} if str(raw).strip() else set()
+
+
 class NapCatAdapter(BasePlatformAdapter):
     """Hermes platform adapter for QQ via NapCat (OneBot 11 reverse WebSocket).
 
@@ -321,8 +343,22 @@ class NapCatAdapter(BasePlatformAdapter):
         self._allow_from: list[str] = [str(x) for x in extra.get("allow_from", [])]
         self._group_policy: str = extra.get("group_policy", "open")
         self._group_allow_from: list[str] = [str(x) for x in extra.get("group_allow_from", [])]
+        # Friend-add policy.  open     = auto-accept everyone (default).
+        #                   allowlist = only accept QQ numbers in allow_from/admins.
+        #                   disabled  = never auto-handle (log only, no accept/reject).
+        self._friend_policy: str = str(extra.get("friend_policy", "open")).lower()
         self._media_max_mb: int = int(extra.get("media_max_mb", 5))
         self._admins: list[str] = [str(x) for x in extra.get("admins", [])]
+        # Robust friend allowlist: extra config may hold admins/allow_from as either
+        # a real list, a comma string ("123,456"), or a JSON-string list
+        # ('["123","456"]').  Parse all three so the allowlist check works regardless.
+        self._friend_allow: set[str] = (
+            _coerce_qid_set(extra.get("admins")) | _coerce_qid_set(extra.get("allow_from"))
+        )
+        # Whether to echo a "reply" segment pointing at the incoming message.
+        # off (default) = send fresh top-level messages; first = reply only
+        # when replying to a quoted message; all = always reply.
+        self._reply_to_mode: str = str(extra.get("reply_to_mode", "off")).lower()
 
         self._runner: aiohttp.web.AppRunner | None = None
         self._active_ws: set[aiohttp.web.WebSocketResponse] = set()
@@ -336,7 +372,7 @@ class NapCatAdapter(BasePlatformAdapter):
 
     # ── Connection ─────────────────────────────────────────────────────────
 
-    async def connect(self) -> bool:
+    async def connect(self, is_reconnect: bool = False) -> bool:
         if not self._http_api:
             logger.error("NapCat: http_api is not configured")
             return False
@@ -395,6 +431,9 @@ class NapCatAdapter(BasePlatformAdapter):
         try:
             data: dict = json.loads(raw)
         except json.JSONDecodeError:
+            return
+        if data.get("post_type") == "request":
+            await self._handle_request(data)
             return
         if data.get("post_type") != "message":
             return
@@ -475,18 +514,23 @@ class NapCatAdapter(BasePlatformAdapter):
         if image_urls:
             msg_type = MessageType.PHOTO
             max_bytes = self._media_max_mb * 1024 * 1024
-            for url in image_urls[:1]:  # cache first image for vision tool
+            for idx, url in enumerate(image_urls):
                 try:
                     async with aiohttp.ClientSession() as session:
                         async with session.get(url) as resp:
                             resp.raise_for_status()
                             img_data = await resp.read()
                     if len(img_data) <= max_bytes:
-                        cached = cache_image_from_bytes(img_data)
-                        media_urls.append(cached)
-                        media_types.append("image/jpeg")
+                        if idx == 0:  # cache first image for vision tool
+                            cached = cache_image_from_bytes(img_data)
+                            media_urls.append(cached)
+                            media_types.append("image/jpeg")
+                    else:
+                        # Over-limit: keep the remote URL so the agent can still use it
+                        text = (text + f"\n[图片 {len(img_data)//1024}KB 超过 {self._media_max_mb}MB 上限, 远程URL: {url}]").strip()
                 except Exception as exc:
                     logger.debug("NapCat: image download failed: %s", exc)
+                    text = (text + f"\n[图片下载失败, 远程URL: {url}]").strip()
 
         elif record_url:
             msg_type = MessageType.VOICE
@@ -496,6 +540,9 @@ class NapCatAdapter(BasePlatformAdapter):
                 media_urls.append(wav)
                 media_types.append("audio/wav")
                 logger.debug("NapCat: voice -> %s", wav)
+            else:
+                # Over-limit or conversion failure: keep the remote URL
+                text = (text + f"\n[语音超过 {self._media_max_mb}MB 上限或转换失败, 远程URL: {record_url}]").strip()
 
         if not text and not media_urls:
             return
@@ -510,25 +557,15 @@ class NapCatAdapter(BasePlatformAdapter):
         )
 
         is_admin = sender_id in self._admins
-        if is_admin:
-            permission_prompt = (
-                f"[管理员] QQ:{sender_id}。"
-                "你现在运行在本机 Hermes 环境，拥有完整本地工具访问权限。"
-                "可直接调用：terminal（执行 shell 命令）、read_file（读取本机文件）、"
-                "write_file、web_search、browser、vision_analyze 等所有工具。"
-                "读取文件、查看日志、执行查询等只读操作直接执行，无需确认。"
-                "仅对真正不可逆的操作（删除文件、踢人、禁言、修改配置等）需先说明再执行。"
-            )
-        else:
-            permission_prompt = (
-                f"[普通用户] QQ:{sender_id}。"
-                "你现在运行在本机 Hermes 环境，可直接调用：web_search（搜索）、"
-                "read_file（只读访问本机文件）、terminal（只读/非破坏性命令）、"
-                "vision_analyze、skills_list 等工具。"
-                "禁止：写入/删除系统文件、执行破坏性 shell 命令、"
-                "调用 QQ 管理工具（踢人/禁言等）。"
-                "如请求管理操作，告知需联系管理员。"
-            )
+        role_label = "管理员" if is_admin else "用户"
+        permission_prompt = (
+            f"[{role_label}] QQ:{sender_id}。"
+            "你现在运行在本机 Hermes 环境，拥有完整本地工具访问权限。"
+            "可直接调用：terminal（执行 shell 命令）、read_file（读取本机文件）、"
+            "write_file、web_search、browser、vision_analyze 等所有工具。"
+            "读取文件、查看日志、执行查询等只读操作直接执行，无需确认。"
+            "仅对真正不可逆的操作（删除文件、踢人、禁言、修改配置等）需先说明再执行。"
+        )
 
         message_event = MessageEvent(
             text=text,
@@ -553,6 +590,41 @@ class NapCatAdapter(BasePlatformAdapter):
 
         await self.handle_message(message_event)
 
+    async def _handle_request(self, data: dict) -> None:
+        """Handle non-message post_types, mainly friend requests.
+
+        OneBot11 request events carry post_type='request'. Friend requests
+        have request_type='friend'. We auto-accept incoming friend requests so
+        the bot can be added normally. Group join/invite requests we only log.
+        """
+        request_type = data.get("request_type")
+        if request_type == "friend":
+            flag = data.get("flag", "")
+            user_id = str(data.get("user_id", ""))
+            if self._friend_policy == "open":
+                approve = True
+            elif self._friend_policy == "allowlist":
+                approve = user_id in self._friend_allow
+            else:  # disabled
+                logger.info("NapCat: friend request from %s — friend_policy=disabled, ignoring", user_id)
+                return
+            logger.info(
+                "NapCat: friend request from %s (flag=%s) — %s",
+                user_id, flag, "accepting" if approve else "rejecting (not in allowlist)",
+            )
+            try:
+                from .api import call_onebot_api
+                resp = await call_onebot_api(
+                    self._http_api, "set_friend_add_request",
+                    {"flag": flag, "approve": approve},
+                    self._access_token or None,
+                )
+                logger.info("NapCat: friend request handled, api=%s", resp)
+            except Exception:
+                logger.exception("NapCat: failed to handle friend request")
+        else:
+            logger.info("NapCat: ignoring %s request event (only friend requests are auto-handled)", request_type)
+
     # ── Outbound ───────────────────────────────────────────────────────────
 
     def _parse_chat_id(self, chat_id: str) -> tuple[bool, int]:
@@ -571,9 +643,16 @@ class NapCatAdapter(BasePlatformAdapter):
             is_group, num_id = self._parse_chat_id(chat_id)
             chunks = _chunk_text(_strip_markdown(content))
             last_id: str | None = None
+            # reply_to_mode governs whether we attach a "reply" segment:
+            #   off (default)  -> send fresh top-level message
+            #   first          -> reply only when replying to a quoted msg
+            #   all            -> always reply to the triggering message
+            use_reply = self._reply_to_mode == "all" or (
+                self._reply_to_mode == "first" and reply_to
+            )
             for i, chunk in enumerate(chunks):
                 segs: list[dict] = []
-                if i == 0 and reply_to:
+                if i == 0 and use_reply and reply_to:
                     try:
                         segs.append(reply_segment(int(reply_to)))
                     except (ValueError, TypeError):
