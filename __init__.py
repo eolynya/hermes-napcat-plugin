@@ -83,12 +83,22 @@ def register(ctx) -> None:
         logger.warning("NapCat: failed to register platform adapter", exc_info=True)
 
     # 3) Bundled QQ skill (hermes_napcat/skills/qq/SKILL.md) — register it so
-    #    skill_view("hermes-napcat:qq-napcat") resolves.  The legacy
-    #    `hermes-napcat install` path copies this file into the flat
-    #    ~/.hermes/skills/qq/ tree; the plugin path registers it as a
-    #    plugin-scoped read-only skill instead (no tree writes, no clobbering
-    #    a locally-enhanced copy).  Registered last so a failure here never
-    #    blocks platform registration.
+    #    skill_view("hermes-napcat:qq-napcat") resolves, AND copy it into the
+    #    flat ~/.hermes/skills/qq/ tree so it appears in the <available_skills>
+    #    index (auto-loaded, model sees it without explicit lookup).
+    #
+    #    register_skill() alone is NOT enough for auto-load: its contract
+    #    (hermes_cli/plugins.py:1264) explicitly says plugin skills do NOT
+    #    enter the flat tree and are NOT listed in <available_skills> — they
+    #    are opt-in explicit loads only.  To make the QQ skill auto-load we
+    #    must ALSO copy it into ~/.hermes/skills/qq/SKILL.md (the flat tree is
+    #    what get_all_skills_dirs()/agent_init scan for the index).
+    #
+    #    Copy is guarded: if the destination already exists (e.g. a previously
+    #    installed/enhanced copy), we do NOT overwrite it — the local copy is
+    #    authoritative and may be richer than the bundled 15KB upstream file.
+    #    This makes the plugin's skill auto-available on a fresh install while
+    #    never clobbering a user's local enhancements.
     try:
         if _SKILL_PATH.exists():
             ctx.register_skill(
@@ -102,6 +112,24 @@ def register(ctx) -> None:
                 ),
             )
             logger.info("NapCat: registered bundled skill qq-napcat")
+            # Auto-load via flat tree (skip if an existing copy is present).
+            try:
+                from hermes_constants import get_skills_dir
+
+                _dst = get_skills_dir() / "qq" / "SKILL.md"
+                if _dst.exists():
+                    logger.info(
+                        "NapCat: flat skill %s already exists — keeping local copy",
+                        _dst,
+                    )
+                else:
+                    _dst.parent.mkdir(parents=True, exist_ok=True)
+                    import shutil
+
+                    shutil.copy2(_SKILL_PATH, _dst)
+                    logger.info("NapCat: installed skill → %s (auto-load via flat tree)", _dst)
+            except Exception:
+                logger.warning("NapCat: failed to install skill into flat tree", exc_info=True)
         else:
             logger.warning("NapCat: bundled skill not found at %s", _SKILL_PATH)
     except Exception:
