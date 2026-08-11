@@ -8,10 +8,17 @@ the ``qq_*`` toolset through the public PluginContext surface
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["register"]
+
+# Path to the bundled QQ skill shipped inside this plugin
+# (hermes_napcat/skills/qq/SKILL.md).  Registered via ctx.register_skill so it
+# is resolvable as skill_view("hermes-napcat:qq-napcat") without touching the
+# flat ~/.hermes/skills tree.
+_SKILL_PATH = Path(__file__).resolve().parent / "hermes_napcat" / "skills" / "qq" / "SKILL.md"
 
 
 def check_requirements() -> bool:
@@ -74,3 +81,28 @@ def register(ctx) -> None:
         )
     except Exception:
         logger.warning("NapCat: failed to register platform adapter", exc_info=True)
+
+    # 3) Bundled QQ skill (hermes_napcat/skills/qq/SKILL.md) — register it so
+    #    skill_view("hermes-napcat:qq-napcat") resolves.  The legacy
+    #    `hermes-napcat install` path copies this file into the flat
+    #    ~/.hermes/skills/qq/ tree; the plugin path registers it as a
+    #    plugin-scoped read-only skill instead (no tree writes, no clobbering
+    #    a locally-enhanced copy).  Registered last so a failure here never
+    #    blocks platform registration.
+    try:
+        if _SKILL_PATH.exists():
+            ctx.register_skill(
+                name="qq-napcat",
+                path=_SKILL_PATH,
+                description=(
+                    "Interact with QQ via the NapCat / OneBot 11 adapter. "
+                    "Use for sending messages, group management, file "
+                    "transfers, member info, notices, reactions, OCR, and "
+                    "translation."
+                ),
+            )
+            logger.info("NapCat: registered bundled skill qq-napcat")
+        else:
+            logger.warning("NapCat: bundled skill not found at %s", _SKILL_PATH)
+    except Exception:
+        logger.warning("NapCat: failed to register bundled skill", exc_info=True)
