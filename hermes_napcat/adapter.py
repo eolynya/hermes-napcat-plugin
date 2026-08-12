@@ -794,3 +794,87 @@ class NapCatAdapter(BasePlatformAdapter):
                 return
         except Exception:
             logger.debug("NapCat: stop_typing failed (non-fatal)", exc_info=True)
+
+
+# ── Standalone delivery (cron out-of-process push) ──────────────────────────
+#
+# Registered via the plugin's root __init__.py register() → ctx.register_platform
+# as `standalone_sender_fn`.  Hermes' cron delivery preflight
+# (`_is_known_delivery_platform`) accepts a plugin platform when its
+# PlatformEntry declares `cron_deliver_env_var` — without it,
+# `deliver=napcat:xxx` cron jobs are rejected as an unknown platform even
+# though the gateway adapter works fine.
+#
+# Marker: _napcat_plugin_registration
+
+
+async def _standalone_send(
+    pconfig,
+    chat_id: str,
+    message: str,
+    *,
+    thread_id: str | None = None,
+    media_files: list[str] | None = None,
+    force_document: bool = False,
+) -> dict[str, Any]:
+    """Out-of-process push delivery for cron jobs running detached from the gateway.
+
+    Without this hook, ``deliver=napcat`` cron jobs fail with "No live adapter
+    for platform 'napcat'" when cron runs as its own process.  Sends via the
+    OneBot HTTP API directly (same path as NapCatAdapter.send) so no gateway
+    WebSocket session is required.
+
+    ``thread_id`` is accepted for signature parity but ignored — QQ has no
+    thread primitive.  ``media_files`` are not deliverable from this path
+    (requires a publicly reachable URL); a text hint is appended instead.
+    """
+    extra = getattr(pconfig, "extra", {}) or {}
+    http_api = str(extra.get("http_api", "") or "").rstrip("/")
+    access_token = str(extra.get("access_token", "") or "") or None
+    if not http_api:
+        return {"error": "NapCat standalone send: missing http_api in platform config"}
+    if not chat_id:
+        return {"error": "NapCat standalone send: missing chat_id"}
+
+    is_group = chat_id.startswith("group:")
+    num_id = int(chat_id[6:]) if is_group else int(chat_id)
+
+    parts = _chunk_text(_strip_markdown(message or ""))
+    if media_files:
+        parts.append(f"[{len(media_files)} attachment(s) generated; not deliverable from cron]")
+
+    last_id: str | None = None
+    try:
+        for chunk in parts:
+            segs: list[dict] = [text_segment(chunk)]
+            if is_group:
+                r = await send_group_msg(http_api, num_id, segs, access_token)
+            else:
+                r = await send_private_msg(http_api, num_id, segs, access_token)
+            last_id = str(r.get("message_id", ""))
+        return {"success": True, "message_id": last_id}
+    except Exception as exc:
+        logger.error("NapCat standalone send error: %s", exc)
+        return {"error": str(exc)}
+
+
+def register(ctx) -> None:
+    """Plugin entry point — called by the Hermes plugin system at startup."""
+    ctx.register_platform(
+        name="napcat",
+        label="NapCat (QQ)",
+        adapter_factory=lambda cfg: NapCatAdapter(cfg),
+        check_fn=check_napcat_requirements,
+        validate_config=None,
+        required_env=[],
+        install_hint=(
+            "NapCat 容器: docker run -d --name napcat --net host "
+            "-e NAPCAT_UID=1000 -e NAPCAT_GID=1000 "
+            "mlikiowa/napcat-docker 详见 README"
+        ),
+        # Declare cron delivery support: lets `deliver=napcat:xxx` jobs pass
+        # preflight without hardcoding "napcat" into core's whitelist.
+        cron_deliver_env_var="NAPCAT_HOME_CHANNEL",
+        # Out-of-process cron delivery via OneBot HTTP (no gateway WS needed).
+        standalone_sender_fn=_standalone_send,
+    )

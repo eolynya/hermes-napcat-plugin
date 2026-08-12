@@ -59,7 +59,7 @@ def register(ctx) -> None:
 
     # 2) napcat platform adapter.  Relative import — see note above.
     try:
-        from .hermes_napcat.adapter import NapCatAdapter
+        from .hermes_napcat.adapter import NapCatAdapter, _standalone_send
 
         ctx.register_platform(
             name="napcat",
@@ -78,6 +78,11 @@ def register(ctx) -> None:
                 "no **bold**, no ## headings; use - bullets and 1) numbering). "
                 "Keep responses concise and friendly."
             ),
+            # Declare cron delivery support: lets `deliver=napcat:xxx` jobs pass
+            # preflight without hardcoding "napcat" into core's whitelist.
+            cron_deliver_env_var="NAPCAT_HOME_CHANNEL",
+            # Out-of-process cron delivery via OneBot HTTP (no gateway WS needed).
+            standalone_sender_fn=_standalone_send,
         )
     except Exception:
         logger.warning("NapCat: failed to register platform adapter", exc_info=True)
