@@ -233,6 +233,20 @@ def _extract_reply_id(segments: list[dict]) -> int | None:
     return None
 
 
+def _extract_reply_text(segments: list[dict]) -> str | None:
+    """Return the quoted text embedded in a reply segment, if any.
+
+    NapCat patch: the reply segment may carry a `text` field with the quoted
+    message's content, which avoids the (often failing) get_msg lookup.
+    """
+    for s in segments:
+        if s["type"] == "reply":
+            t = (s.get("data") or {}).get("text")
+            if t:
+                return str(t)
+    return None
+
+
 def _has_bot_mention(segments: list[dict], self_id: str) -> bool:
     return any(
         s["type"] == "at" and str(s["data"].get("qq")) == self_id
@@ -265,12 +279,71 @@ def _chunk_text(text: str, limit: int = _QQ_TEXT_LIMIT) -> list[str]:
     return chunks
 
 
-async def _download_and_convert_wav(url: str, max_bytes: int) -> str | None:
+def _resolve_voice_path(url: str) -> str | None:
+    """Map NapCat in-container paths to host paths (docker bind mounts).
+
+    NapCat record segments report the file as an in-container absolute path
+    (e.g. /app/.config/QQ/...) which the Hermes process (host) cannot HTTP-GET
+    nor open directly. The docker deployment bind-mounts /opt/napcat/.config
+    to /app/.config/QQ, so we rewrite the prefix and read the file locally.
+    """
+    if not url:
+        return None
+    p = url[7:] if url.startswith("file://") else url
+    mappings = (
+        ("/app/.config/QQ", "/opt/napcat/.config"),  # QQ data bind mount
+    )
+    for prefix, host_prefix in mappings:
+        if p.startswith(prefix):
+            host = host_prefix + p[len(prefix):]
+            if os.path.exists(host):
+                return host
+    if os.path.exists(p):
+        return p
+    return None
+
+
+async def _download_and_convert_wav(url: str, max_bytes: int, http_api: str = "") -> str | None:
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                resp.raise_for_status()
-                data = await resp.read()
+        local = _resolve_voice_path(url)
+        logger.debug("NapCat: voice url=%s local=%s max=%d", url, local, max_bytes)
+        if local:
+            with open(local, "rb") as f:
+                data = f.read()
+        else:
+            data = None
+            # In-container path not yet visible on the host: ask NapCat to
+            # convert the record via get_record, then read it immediately —
+            # QQ Ptt files under /app/.config/QQ are temporary and may be
+            # cleaned up seconds after the event arrives.
+            if url.startswith("/app/") and http_api:
+                basename = url.rsplit("/", 1)[-1]
+                try:
+                    from .api import call_onebot_api
+                    resp = await call_onebot_api(http_api, "get_record", {"file": basename, "out_format": "wav"})
+                    wav_path = (resp.get("data") or {}).get("file") or ""
+                    wav_local = _resolve_voice_path(wav_path)
+                    if wav_local:
+                        # Copy to a stable temp path: NapCat may clean Ptt files anytime
+                        fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+                        os.close(fd)
+                        with open(wav_local, "rb") as f:
+                            data = f.read()
+                        with open(tmp_path, "wb") as f:
+                            f.write(data)
+                        logger.info("NapCat: voice get_record -> %d bytes (copied)", len(data))
+                        if len(data) > max_bytes:
+                            os.unlink(tmp_path)
+                            return None
+                        return tmp_path
+                except Exception as exc:
+                    logger.info("NapCat: voice get_record failed: %s", exc)
+            if data is None:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url) as resp:
+                        resp.raise_for_status()
+                        data = await resp.read()
+        logger.debug("NapCat: voice data=%d bytes", len(data))
         if len(data) > max_bytes:
             return None
         fd, in_path = tempfile.mkstemp(suffix=".silk")
@@ -278,12 +351,25 @@ async def _download_and_convert_wav(url: str, max_bytes: int) -> str | None:
         out_path = in_path.replace(".silk", ".wav")
         with open(in_path, "wb") as f:
             f.write(data)
+        # 1) Try ffmpeg first (handles standard formats: mp3/ogg/wav...)
         result = subprocess.run(
             ["ffmpeg", "-y", "-i", in_path, "-ar", "16000", "-ac", "1", "-f", "wav", out_path],
             capture_output=True, timeout=15,
         )
+        logger.debug("NapCat: voice ffmpeg rc=%d", result.returncode)
+        if result.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) <= 44:
+            # 2) QQ voice is SILK v3 with a 0x02-prefixed header — ffmpeg has no
+            #    SILK decoder, so fall back to pilk (silk_to_wav).
+            try:
+                import pilk
+                pilk.silk_to_wav(in_path, out_path, rate=16000)
+                logger.debug("NapCat: voice pilk ok size=%d", os.path.getsize(out_path))
+            except Exception as exc:
+                logger.debug("NapCat: voice pilk failed: %s", exc)
+                os.unlink(in_path)
+                return None
         os.unlink(in_path)
-        if result.returncode != 0:
+        if not os.path.exists(out_path) or os.path.getsize(out_path) <= 44:
             return None
         return out_path
     except Exception as exc:
@@ -491,20 +577,28 @@ class NapCatAdapter(BasePlatformAdapter):
         reply_id = _extract_reply_id(event.get("message", []))
         reply_text: str | None = None
         if reply_id:
-            try:
-                quoted = await get_msg(self._http_api, reply_id, self._access_token or None)
-                q_sender = quoted.get("sender", {})
-                q_name = (
-                    q_sender.get("card")
-                    or q_sender.get("nickname")
-                    or str(q_sender.get("user_id", ""))
-                )
-                q_text = _extract_text(quoted.get("message", []))
-                if q_text:
-                    reply_text = f"[{q_name}]: {q_text}"
-                    text = f"[引用 {q_name} 的消息: {q_text}]\n{text}"
-            except Exception:
-                pass
+            # NapCat patch: reply segment may carry the quoted text directly
+            # (NapCat's get_msg lookup fails for private replies, so prefer
+            # the inline text when present).
+            seg_text = _extract_reply_text(event.get("message", []))
+            if seg_text:
+                reply_text = f"[引用消息]: {seg_text}"
+                text = f"[引用消息: {seg_text}]\n{text}"
+            else:
+                try:
+                    quoted = await get_msg(self._http_api, reply_id, self._access_token or None)
+                    q_sender = quoted.get("sender", {})
+                    q_name = (
+                        q_sender.get("card")
+                        or q_sender.get("nickname")
+                        or str(q_sender.get("user_id", ""))
+                    )
+                    q_text = _extract_text(quoted.get("message", []))
+                    if q_text:
+                        reply_text = f"[{q_name}]: {q_text}"
+                        text = f"[引用 {q_name} 的消息: {q_text}]\n{text}"
+                except Exception:
+                    pass
 
         # Determine MessageType and media
         media_urls: list[str] = []
@@ -535,7 +629,7 @@ class NapCatAdapter(BasePlatformAdapter):
         elif record_url:
             msg_type = MessageType.VOICE
             max_bytes = self._media_max_mb * 1024 * 1024
-            wav = await _download_and_convert_wav(record_url, max_bytes)
+            wav = await _download_and_convert_wav(record_url, max_bytes, self._http_api)
             if wav:
                 media_urls.append(wav)
                 media_types.append("audio/wav")
