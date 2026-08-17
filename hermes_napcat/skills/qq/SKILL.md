@@ -353,6 +353,41 @@ qq_set_group_remark(group_id = "G", remark = "Work group")
 
 ---
 
+## 发送文件（upload_private_file）— 本地路径报「识别URL失败」，走分块流式（2026-08-17 实测）
+`qq_upload_file` / `upload_private_file` 的 `file` 参数**不能传宿主机本地路径**（报 `识别URL失败: uri= /path/to/file`），只认 URL 或 NapCat 容器内路径。发宿主机文件的正确链路 = NapCat 扩展接口 `upload_file_stream` 分块流式：
+
+```python
+import base64, json, urllib.request, uuid
+API = 'http://127.0.0.1:18801'  # 本机 NapCat HTTP 端口
+def call(action, payload):
+    req = urllib.request.Request(API + '/' + action,
+        data=json.dumps(payload).encode(),
+        headers={'Content-Type': 'application/json'})
+    return json.loads(urllib.request.urlopen(req, timeout=180).read().decode())
+
+data = open('/path/to/local/file.md', 'rb').read()
+sid = str(uuid.uuid4())
+
+# 1) 创建流
+call('upload_file_stream', {'stream_id': sid, 'total_chunks': 1,
+                            'file_size': len(data), 'filename': 'x.md',
+                            'file_retention': 10 * 60 * 1000})  # 保留 10 分钟(ms)
+# 2) 发块(单块 base64, 大文件按 chunk_index 0..N-1 分块)
+call('upload_file_stream', {'stream_id': sid, 'chunk_data': base64.b64encode(data).decode(), 'chunk_index': 0})
+# 3) 完成 → data.file_path = 容器内路径
+r3 = call('upload_file_stream', {'stream_id': sid, 'is_complete': True})
+file_path = r3['data']['file_path']
+# 4) 发到私聊
+r4 = call('upload_private_file', {'user_id': '目标QQ号', 'file': file_path, 'name': 'x.md'})
+# r4 返回 {"status":"ok","retcode":0,"data":{"file_id":...}} 即成功
+```
+
+**坑**：
+- 本地路径/宿主机路径一律 `识别URL失败`，必须走上面的流式链路拿到容器内 file_path 再发
+- `file_retention` 单位是 ms（示例 = 10 分钟），超时容器内临时文件被清，需重建流
+- 大文件按 `total_chunks` 分块，chunk_index 从 0 开始，全部发完再 `is_complete`
+- 若宿主机设了 `http_proxy` 环境变量，curl/urllib 直连 127.0.0.1 可能被代理劫持报 502，需绕过代理（curl 加 `--noproxy '*'`）
+
 ## Common Workflows
 
 ### Reply to a message in a group
