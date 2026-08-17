@@ -17,6 +17,7 @@ async def call_onebot_api(
     params: dict[str, Any] | None = None,
     access_token: str | None = None,
     timeout: float = 10,
+    strict_content_type: bool = True,
 ) -> dict[str, Any]:
     url = f"{base_url.rstrip('/')}/{action}"
     headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -28,7 +29,10 @@ async def call_onebot_api(
     ) as session:
         async with session.post(url, json=params or {}, headers=headers) as resp:
             resp.raise_for_status()
-            data: dict[str, Any] = await resp.json()
+            if strict_content_type:
+                data: dict[str, Any] = await resp.json()
+            else:
+                data = await resp.json(content_type=None)
             if data.get("retcode", 0) != 0:
                 raise RuntimeError(
                     f"OneBot API error {action}: retcode={data.get('retcode')} status={data.get('status')}"
@@ -110,6 +114,64 @@ async def upload_private_file(
         access_token=access_token,
         timeout=60,
     )
+
+
+async def upload_file_stream(
+    base_url: str,
+    file_path: str,
+    name: str,
+    access_token: str | None = None,
+    chunk_size: int = 10 * 1024 * 1024,
+    retention_ms: int = 30 * 60 * 1000,
+) -> str:
+    """Stream a host file into NapCat's container temp dir via upload_file_stream.
+
+    NapCat's upload_private_file / upload_group_file only accept URLs or
+    container-side paths — host paths fail with 识别URL失败. This helper
+    uploads the file in base64 chunks and returns the container-side path.
+    """
+    import base64 as _b64
+    import uuid as _uuid
+    from pathlib import Path
+
+    data = Path(file_path).read_bytes()
+    total = max(1, (len(data) + chunk_size - 1) // chunk_size)
+    stream_id = str(_uuid.uuid4())
+
+    # 1) create stream
+    await call_onebot_api(
+        base_url, "upload_file_stream",
+        {"stream_id": stream_id, "total_chunks": total,
+         "file_size": len(data), "filename": name,
+         "file_retention": retention_ms},
+        access_token=access_token,
+        timeout=30,
+        strict_content_type=False,
+    )
+    # 2) upload chunks
+    for i in range(total):
+        chunk = data[i * chunk_size:(i + 1) * chunk_size]
+        await call_onebot_api(
+            base_url, "upload_file_stream",
+            {"stream_id": stream_id,
+             "chunk_data": _b64.b64encode(chunk).decode(),
+             "chunk_index": i},
+            access_token=access_token,
+            timeout=120,
+            strict_content_type=False,
+        )
+    # 3) complete → container-side path
+    resp = await call_onebot_api(
+        base_url, "upload_file_stream",
+        {"stream_id": stream_id, "is_complete": True},
+        access_token=access_token,
+        timeout=60,
+        strict_content_type=False,
+    )
+    file_path_container = resp.get("data", {}).get("file_path")
+    if not file_path_container:
+        raise RuntimeError(f"upload_file_stream complete: no file_path in {resp}")
+    return file_path_container
 
 
 # ---------- segment builders ----------

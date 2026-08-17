@@ -58,6 +58,7 @@ from .api import (
     text_segment,
     upload_group_file,
     upload_private_file,
+    upload_file_stream,
     video_segment,
 )
 
@@ -826,6 +827,13 @@ class NapCatAdapter(BasePlatformAdapter):
         try:
             is_group, num_id = self._parse_chat_id(chat_id)
             name = filename or os.path.basename(file_path)
+            # NapCat only accepts URLs or container-side paths — stream host
+            # files into the container temp dir first (fixes 识别URL失败).
+            if file_path and not file_path.startswith(("http://", "https://", "file://")) \
+                    and os.path.isfile(file_path):
+                file_path = await upload_file_stream(
+                    self._http_api, file_path, name, self._access_token or None,
+                )
             if is_group:
                 await upload_group_file(self._http_api, num_id, file_path, name, self._access_token or None)
             else:
