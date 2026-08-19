@@ -86,6 +86,21 @@ async def get_msg(
     return resp["data"]
 
 
+async def get_file(
+    base_url: str,
+    file_id: str,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    """Resolve a OneBot file_id to NapCat's container-side file info."""
+    resp = await call_onebot_api(
+        base_url, "get_file",
+        {"file_id": file_id},
+        access_token=access_token,
+        timeout=30,
+    )
+    return resp["data"]
+
+
 async def upload_group_file(
     base_url: str,
     group_id: int,

@@ -48,6 +48,7 @@ from gateway.session import SessionSource
 
 from .api import (
     call_onebot_api,
+    get_file,
     get_login_info,
     get_msg,
     image_segment,
@@ -221,6 +222,49 @@ def _extract_record(segments: list[dict]) -> str | None:
     for s in segments:
         if s["type"] == "record":
             return s["data"].get("url") or s["data"].get("file")
+    return None
+
+
+def _extract_files(segments: list[dict]) -> list[dict]:
+    files = []
+    for s in segments:
+        if s["type"] == "file":
+            d = s.get("data", {})
+            files.append(
+                {
+                    "name": d.get("file", "") or d.get("name", "") or "未知文件",
+                    "file_id": d.get("file_id", ""),
+                    "size": d.get("file_size", ""),
+                }
+            )
+    return files
+
+
+# NapCat docker: /app/.config/QQ is bind-mounted to /opt/napcat/.config
+_CONTAINER_MOUNT = "/app/.config/QQ"
+_HOST_MOUNT = "/opt/napcat/.config"
+
+
+async def _resolve_private_file(
+    api_base: str,
+    file_id: str,
+    access_token: str | None,
+) -> str | None:
+    """Map a OneBot file_id to a host-readable path (NapCat docker layout)."""
+    if not file_id:
+        return None
+    try:
+        data = await get_file(api_base, file_id, access_token)
+    except Exception as exc:
+        logger.debug("NapCat: get_file failed: %s", exc)
+        return None
+    cpath = data.get("file") or data.get("url") or ""
+    if not cpath:
+        return None
+    if cpath.startswith(_CONTAINER_MOUNT):
+        hpath = _HOST_MOUNT + cpath[len(_CONTAINER_MOUNT):]
+        if os.path.exists(hpath):
+            return hpath
     return None
 
 
@@ -638,6 +682,17 @@ class NapCatAdapter(BasePlatformAdapter):
             else:
                 # Over-limit or conversion failure: keep the remote URL
                 text = (text + f"\n[语音超过 {self._media_max_mb}MB 上限或转换失败, 远程URL: {record_url}]").strip()
+
+        # File messages: resolve file_id to a host path so the agent can
+        # read the file on disk.
+        for f in _extract_files(segments):
+            hpath = await _resolve_private_file(
+                self._http_api, f["file_id"], self._access_token or None
+            )
+            if hpath:
+                text = (text + f"\n[收到文件: {f['name']} 大小{f['size']}字节, 本地路径: {hpath}]").strip()
+            else:
+                text = (text + f"\n[收到文件: {f['name']} 大小{f['size']}字节, 但下载失败(file_id={f['file_id']})]").strip()
 
         if not text and not media_urls:
             return
