@@ -354,10 +354,14 @@ qq_set_group_remark(group_id = "G", remark = "Work group")
 ---
 
 ## 发送文件（upload_private_file）— 本地路径报「识别URL失败」，走分块流式（2026-08-17 实测）
-`qq_upload_file` / `upload_private_file` 的 `file` 参数**不能传宿主机本地路径**（报 `识别URL失败: uri= /path/to/file`），只认 URL 或 NapCat 容器内路径。发宿主机文件的正确链路 = NapCat 扩展接口 `upload_file_stream` 分块流式：
+`qq_upload_file` / `upload_private_file` 的 `file` 参数**不能传宿主机本地路径**（报 `识别URL失败: uri= /path/to/file`），只认 URL 或 NapCat 容器内路径。
+
+**插件已封装，优先直接发**：`NapCatAdapter.send_document()` 会自动判断——`file://` 前缀先解码成本地路径（处理 `%20`、中文名、Windows `file:///C:/` 盘符），普通宿主路径直接走 `upload_file_stream` 分块上送，拿到容器内路径后再调 `upload_private_file` / `upload_group_file`。用 qq 工具发文件时直接给本地路径即可，不要自己拼流式链路。
+
+只有绕过适配器、直接打 NapCat HTTP 时，才需要手写下面的流程（NapCat 扩展接口分块流式）：
 
 ```python
-import base64, json, urllib.request, uuid
+import base64, json, os, urllib.request, uuid
 API = 'http://127.0.0.1:18801'  # 本机 NapCat HTTP 端口
 def call(action, payload):
     req = urllib.request.Request(API + '/' + action,
@@ -365,15 +369,23 @@ def call(action, payload):
         headers={'Content-Type': 'application/json'})
     return json.loads(urllib.request.urlopen(req, timeout=180).read().decode())
 
-data = open('/path/to/local/file.md', 'rb').read()
+CHUNK = 10 * 1024 * 1024
+size = os.path.getsize('/path/to/local/file.md')
+total = max(1, (size + CHUNK - 1) // CHUNK)
 sid = str(uuid.uuid4())
 
 # 1) 创建流
-call('upload_file_stream', {'stream_id': sid, 'total_chunks': 1,
-                            'file_size': len(data), 'filename': 'x.md',
+call('upload_file_stream', {'stream_id': sid, 'total_chunks': total,
+                            'file_size': size, 'filename': 'x.md',
                             'file_retention': 10 * 60 * 1000})  # 保留 10 分钟(ms)
-# 2) 发块(单块 base64, 大文件按 chunk_index 0..N-1 分块)
-call('upload_file_stream', {'stream_id': sid, 'chunk_data': base64.b64encode(data).decode(), 'chunk_index': 0})
+# 2) 按块读 + 发块（chunk_index 0..N-1）——不要一次性 read() 整个文件
+with open('/path/to/local/file.md', 'rb') as fh:
+    for i in range(total):
+        chunk = fh.read(CHUNK)
+        if not chunk:
+            break
+        call('upload_file_stream', {'stream_id': sid,
+             'chunk_data': base64.b64encode(chunk).decode(), 'chunk_index': i})
 # 3) 完成 → data.file_path = 容器内路径
 r3 = call('upload_file_stream', {'stream_id': sid, 'is_complete': True})
 file_path = r3['data']['file_path']
@@ -384,6 +396,8 @@ r4 = call('upload_private_file', {'user_id': '目标QQ号', 'file': file_path, '
 
 **坑**：
 - 本地路径/宿主机路径一律 `识别URL失败`，必须走上面的流式链路拿到容器内 file_path 再发
+- `file://` **不能原样透传**：NapCat 会把它当 URL 去取而失败，必须先 `unquote(urlparse(p).path)` 解码成本地路径（Windows 的 `file:///C:/x` 还要去掉前导 `/`）
+- 一次性 `read()` + base64 会让大文件内存峰值达到文件大小的约 2.3 倍（原数据 + base64 副本），必须按块读，10MB 一块即可
 - `file_retention` 单位是 ms（示例 = 10 分钟），超时容器内临时文件被清，需重建流
 - 大文件按 `total_chunks` 分块，chunk_index 从 0 开始，全部发完再 `is_complete`
 - 若宿主机设了 `http_proxy` 环境变量，curl/urllib 直连 127.0.0.1 可能被代理劫持报 502，需绕过代理（curl 加 `--noproxy '*'`）
