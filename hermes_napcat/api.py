@@ -146,35 +146,39 @@ async def upload_file_stream(
     uploads the file in base64 chunks and returns the container-side path.
     """
     import base64 as _b64
+    import os as _os
     import uuid as _uuid
-    from pathlib import Path
 
-    data = Path(file_path).read_bytes()
-    total = max(1, (len(data) + chunk_size - 1) // chunk_size)
+    size = _os.path.getsize(file_path)
+    total = max(1, (size + chunk_size - 1) // chunk_size)
     stream_id = str(_uuid.uuid4())
 
     # 1) create stream
     await call_onebot_api(
         base_url, "upload_file_stream",
         {"stream_id": stream_id, "total_chunks": total,
-         "file_size": len(data), "filename": name,
+         "file_size": size, "filename": name,
          "file_retention": retention_ms},
         access_token=access_token,
         timeout=30,
         strict_content_type=False,
     )
-    # 2) upload chunks
-    for i in range(total):
-        chunk = data[i * chunk_size:(i + 1) * chunk_size]
-        await call_onebot_api(
-            base_url, "upload_file_stream",
-            {"stream_id": stream_id,
-             "chunk_data": _b64.b64encode(chunk).decode(),
-             "chunk_index": i},
-            access_token=access_token,
-            timeout=120,
-            strict_content_type=False,
-        )
+    # 2) upload chunks — read one chunk at a time so a large file is never
+    #    fully resident in memory (and never base64'd wholesale).
+    with open(file_path, "rb") as fh:
+        for i in range(total):
+            chunk = fh.read(chunk_size)
+            if not chunk:
+                break
+            await call_onebot_api(
+                base_url, "upload_file_stream",
+                {"stream_id": stream_id,
+                 "chunk_data": _b64.b64encode(chunk).decode(),
+                 "chunk_index": i},
+                access_token=access_token,
+                timeout=120,
+                strict_content_type=False,
+            )
     # 3) complete → container-side path
     resp = await call_onebot_api(
         base_url, "upload_file_stream",
