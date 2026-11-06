@@ -485,3 +485,23 @@ Parse the returned `messages` array. Each entry has: `message_id`, `sender.user_
 | Recall fails | Message older than 2 minutes, or not sent by the bot | QQ protocol limitation — cannot recall others' messages |
 | Admin grant fails | Bot is not the group owner | Only owners can manage admins |
 | File upload fails | File too large or NapCat lacks disk space | Check file size; NapCat downloads to `~/Napcat` |
+
+---
+
+## 流式传输必须对 NapCat 关闭（2026-11-04 实测）
+
+OneBot 11 没有消息编辑 API，`NapCatAdapter` 未实现 `edit_message`，而基类默认实现返回 `success=False`。
+若 `gateway.streaming.enabled` 为真且未对 napcat 关闭，消费端会先发一条**半截草稿**（末尾带流式光标 ` ▉`，QQ 字体缺字形渲染成黑方块），编辑失败后再补发完整文本——用户看到同一回复拆成两条气泡。
+
+正确配置（双保险）：
+
+```yaml
+display:
+  platforms:
+    napcat:
+      streaming: false
+```
+
+并在 `NapCatAdapter` 类体声明 `SUPPORTS_MESSAGE_EDITING = False`（与 qqbot/weixin 等无编辑能力的适配器一致），让 consumer 走 final-send-only。改完需重启 gateway。
+
+排查口诀：`gateway.log` 里 napcat 会话的 `streamed=True previewed=False` 只说明最终编辑没成功，**不能**证明预览没发出去；要看 QQ 端是否出现带 `▉`/黑方块的两条气泡。

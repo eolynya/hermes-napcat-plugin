@@ -24,6 +24,7 @@ Configuration in ~/.hermes/config.yaml:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ import subprocess
 import tempfile
 from datetime import datetime
 from typing import Any, Optional
+from urllib.parse import unquote, urlparse
 
 import aiohttp
 import aiohttp.web
@@ -459,6 +461,11 @@ class NapCatAdapter(BasePlatformAdapter):
     """
 
     MAX_MESSAGE_LENGTH = _QQ_TEXT_LIMIT
+    # OneBot 11 has no message-edit API, so a streaming preview can never be
+    # finalized in place: the consumer would send a half-finished draft (with the
+    # ▉ cursor, which QQ renders as a tofu block) and then send the full text
+    # again. Declare this so the gateway uses final-send-only for QQ.
+    SUPPORTS_MESSAGE_EDITING = False
 
     def __init__(self, config: PlatformConfig) -> None:
         super().__init__(config, Platform("napcat"))
@@ -836,6 +843,45 @@ class NapCatAdapter(BasePlatformAdapter):
                 r = await send_private_msg(self._http_api, num_id, segs, self._access_token or None)
             return SendResult(success=True, message_id=str(r.get("message_id", "")))
         except Exception as exc:
+            return SendResult(success=False, error=str(exc), retryable=True)
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: str | None = None,
+        reply_to: str | None = None,
+        metadata: dict | None = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a local image file by inlining it as a ``base64://`` segment.
+
+        NapCat runs in its own container, so host paths are not readable from
+        there; OneBot 11 accepts base64 image payloads directly.
+        """
+        try:
+            path = image_path
+            if path.startswith("file://"):
+                path = unquote(urlparse(path).path)
+            with open(path, "rb") as fh:
+                payload = base64.b64encode(fh.read()).decode("ascii")
+            is_group, num_id = self._parse_chat_id(chat_id)
+            segs: list[dict] = []
+            if reply_to:
+                try:
+                    segs.append(reply_segment(int(reply_to)))
+                except (ValueError, TypeError):
+                    pass
+            segs.append(image_segment(f"base64://{payload}"))
+            if caption:
+                segs.append(text_segment(caption))
+            if is_group:
+                r = await send_group_msg(self._http_api, num_id, segs, self._access_token or None)
+            else:
+                r = await send_private_msg(self._http_api, num_id, segs, self._access_token or None)
+            return SendResult(success=True, message_id=str(r.get("message_id", "")))
+        except Exception as exc:
+            logger.error("NapCat send_image_file error: %s", exc)
             return SendResult(success=False, error=str(exc), retryable=True)
 
     async def send_voice(
