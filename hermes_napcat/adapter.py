@@ -242,9 +242,10 @@ def _extract_files(segments: list[dict]) -> list[dict]:
     return files
 
 
-# NapCat docker: /app/.config/QQ is bind-mounted to /opt/napcat/.config
+# NapCat docker: /app/.config/QQ is bind-mounted to /opt/napcat/qq.
+# Keep in sync with `docker inspect napcat --format '{{range .Mounts}}...'`.
 _CONTAINER_MOUNT = "/app/.config/QQ"
-_HOST_MOUNT = "/opt/napcat/.config"
+_HOST_MOUNT = "/opt/napcat/qq"
 
 
 async def _resolve_private_file(
@@ -338,7 +339,8 @@ def _resolve_voice_path(url: str) -> str | None:
         return None
     p = url[7:] if url.startswith("file://") else url
     mappings = (
-        ("/app/.config/QQ", "/opt/napcat/.config"),  # QQ data bind mount
+        ("/app/.config/QQ", "/opt/napcat/qq"),  # QQ data bind mount
+        ("/app/.config/QQ", "/opt/napcat/.config"),  # legacy layout
     )
     for prefix, host_prefix in mappings:
         if p.startswith(prefix):
